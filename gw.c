@@ -2,7 +2,7 @@
 
 gw_ensemble * gw_alloc(int nthreads,int nwalkers,int ndim){
 
-	sampler * s;
+	gw_ensemble * s;
 	int i;
 	int alloc_fail = 0;
 
@@ -11,6 +11,8 @@ gw_ensemble * gw_alloc(int nthreads,int nwalkers,int ndim){
 	size_t lnp_arr_size;
 	size_t pad;
 	size_t stride;
+
+	double * lnp;
 
 	/* For Goodman-Weare:
 	 *
@@ -55,10 +57,10 @@ gw_ensemble * gw_alloc(int nthreads,int nwalkers,int ndim){
 	/* Do the same thing for the lnprob values */
 	lnp_arr_size = CACHE_LINE_SIZE * nwalkers;
 
-	alloc_fail += posix_memalign(&(s->w),
+	alloc_fail += posix_memalign((void**)&(s->w),
 		CACHE_LINE_SIZE, w_arr_size);
 
-	alloc_fail += posix_memalign(&(s->lnp),
+	alloc_fail += posix_memalign((void**)&(s->lnp),
 		CACHE_LINE_SIZE, lnp_arr_size);
 
 	assert(alloc_fail == 0);
@@ -106,7 +108,9 @@ void gw_metropolis(gw_ensemble * s) {
 
 	int tid,i,j,seed,accept;
 	double lnp,lnpp;
-	double * w,prop,_lnp;
+	double * w;
+	double *prop;
+	double *_lnp;
 	gsl_rng * r;
 
 	accept = 0;
@@ -116,7 +120,7 @@ void gw_metropolis(gw_ensemble * s) {
 
 	#pragma omp parallel \
 		private(tid,r,w,prop,i,j,lnpp,lnp,_lnp) \
-		firtprivate(seed,accept) \
+		firstprivate(seed,accept) \
 		shared(s)
 	{
 		tid = omp_get_thread_num();
@@ -146,7 +150,7 @@ void gw_metropolis(gw_ensemble * s) {
 
 			/* pick a gaussian proposal */
 			for(j=0;j<s->ndim;j++){
-				prop[j] = gsl_ran_gaussian(r,s->mh_sigma) + w[j]);
+				prop[j] = gsl_ran_gaussian(r,s->mh_sigma) + w[j];
 			}
 
 			/* get a pointer to log probability value of
@@ -155,7 +159,7 @@ void gw_metropolis(gw_ensemble * s) {
 
 			/* Avoid calculating s->lnprob unless
 			 * this is the first iteration */
-			if *_lnp == 0 {
+			if (*_lnp == 0) {
 				lnp = s->lnprob(w,s->ndim);
 				*_lnp = lnp;
 			}
@@ -186,19 +190,15 @@ void gw_metropolis(gw_ensemble * s) {
 		 free(prop);
 
 		 /* false sharing s->accept here should be ok for now*/
-		 s->accept += accept
+		 s->accept += accept;
 
 	}
 }
 
 void gw_free(gw_ensemble * s) {
 
-	free(s->lnp0);
-	free(s->lnp1);
-	free(s->w0);
-	free(s->w1);
-
-	free(s->ladder);
+	free(s->lnp);
+	free(s->w);
 
 	free(s);
 }
@@ -219,7 +219,7 @@ void gw_gaussian(gw_ensemble * s, double * mu, double sigma){
 	r = gsl_rng_alloc(gsl_rng_mt19937);
 	gsl_rng_set(r,rand());
 
-	w = gw_get(s,0)
+	w = gw_get(s,0);
 	for(i=0;i<nwalkers;i++){
 
 		/* Recall that the ith walker spans the first
@@ -227,8 +227,7 @@ void gw_gaussian(gw_ensemble * s, double * mu, double sigma){
 		 * i*stride bytes  */		
 
 		for(j=0;j<ndim;j++){
-			w0[j] = gsl_ran_gaussian(r,sigma) + mu[j]);
-			w1[j] = gsl_ran_gaussian(r,sigma) + mu[j]);
+			w[j] = gsl_ran_gaussian(r,sigma) + mu[j];
 		}
 
 		w = gw_inc(s->stride,w);
@@ -236,7 +235,7 @@ void gw_gaussian(gw_ensemble * s, double * mu, double sigma){
 	gsl_rng_free(r);
 }
 
-void gw_write_text(sampler * s, char * fname) {
+void gw_write_text(gw_ensemble * s, char * fname) {
 
 	int i;
 	int j;
@@ -244,9 +243,9 @@ void gw_write_text(sampler * s, char * fname) {
 
 	FILE * f = fopen(fname,"w");
 
-	w = gw_get(s,0)
+	w = gw_get(s,0);
 
-	for(i=0,i<s->nwalkers;i++){
+	for(i=0;i<s->nwalkers;i++){
 		for(j=0;j<s->ndim;j++){
 			fprintf(f,"%f,",s->w[j]);
 			fprintf(f,"\n");
