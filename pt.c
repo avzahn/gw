@@ -54,6 +54,7 @@ void pt_swap(gw_ensemble * s0, gw_ensemble * s1) {
  	int i;
  	int j;
  	int tid;
+    int accept;
  	double seed;
  	double lnpdiff;
  	double * tmp;
@@ -65,9 +66,9 @@ void pt_swap(gw_ensemble * s0, gw_ensemble * s1) {
 	omp_set_num_threads(s0->nthreads);
 
  	#pragma omp parallel \
- 		share(s0,s1) \
+ 		shared(s0,s1,accept) \
  		private(r,tid,lnpdiff,i,j,tmp) \
- 		firstprivate(seed,accept)
+ 		firstprivate(seed)
  	{
  		tid = omp_get_thread_num();
 		r = gsl_rng_alloc(gsl_rng_mt19937);
@@ -76,7 +77,7 @@ void pt_swap(gw_ensemble * s0, gw_ensemble * s1) {
 		/* scratch memory for swapping */
 		tmp = (double*)malloc(s0->stride);
 
-		#pragma omp for 
+		#pragma omp for reduction(+:accept)
 		for(i=0;i<s0->nwalkers;i++) {
 
 			lnpdiff = *gw_get_lnp(s0,i) - *gw_get_lnp(s1,i);
@@ -100,12 +101,11 @@ void pt_swap(gw_ensemble * s0, gw_ensemble * s1) {
 				accept += 1;
 			}
 
-			/* I think this is an ok way to do this */
-			s0->accept += accept;
 		}
 
 		free(tmp);
 		free(r);
 	}
+    s0->accept = accept;
 }
 

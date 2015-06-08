@@ -120,8 +120,8 @@ void gw_metropolis(gw_ensemble * s) {
 
 	#pragma omp parallel \
 		private(tid,r,w,prop,i,j,lnpp,lnp,_lnp) \
-		firstprivate(seed,accept) \
-		shared(s)
+		firstprivate(seed) \
+		shared(s,accept)
 	{
 		tid = omp_get_thread_num();
 
@@ -142,7 +142,7 @@ void gw_metropolis(gw_ensemble * s) {
 		  * to store a proposal move */
 		 prop = (double*)malloc(sizeof(double) * s->ndim);
 
-		 #pragma omp for
+		 #pragma omp for reduction(+:accept)
 		 for(i=0;i<s->nwalkers;i++) {
 
 		 	/* pointer to the walker of interest */
@@ -170,7 +170,7 @@ void gw_metropolis(gw_ensemble * s) {
 			lnpp = s->lnprob(prop,s->ndim);
 
 			if( s->B * (lnpp-lnp) > 0 ||
-				 log(gsl_ran_uniform(r)) < s->B * (lnpp-lnp)) {
+				 log(gsl_ran_flat(r,0,1)) < s->B * (lnpp-lnp)) {
 
 				/* Accept proposed move*/
 
@@ -189,10 +189,8 @@ void gw_metropolis(gw_ensemble * s) {
 		 free(r);
 		 free(prop);
 
-		 /* false sharing s->accept here should be ok for now*/
-		 s->accept += accept;
-
 	}
+    s->accept = accept;
 }
 
 void gw_free(gw_ensemble * s) {
