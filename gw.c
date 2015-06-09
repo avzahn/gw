@@ -102,6 +102,126 @@ double * gw_get_lnp(gw_ensemble * s, int i) {
 	return (double*)(((char*)s->lnp) + (s->lnp_arr_stride * i));
 }
 
+void gw_copy(gw_ensemble * src, gw_ensemble * dst){
+
+	memcpy((void*)dst->w,(void*)src->w,src->w_arr_size);
+	memcpy((void*)dst->lnp,(void*)src->lnp,src->lnp_arr_size);
+	dst->w_arr_size = src->w_arr_size;
+	dst->lnp_arr_size = src->lnp_arr_size;
+	dst->stride = src->stride;
+	dst->lnp_arr_stride = src->lnp_arr_stride;
+	
+}
+
+void gw_copy_partial(gw_ensemble * src, gw_ensemble * dst, int idx0, int idx1){
+
+	double * start, end;
+	int size,size_lnp;
+
+	size = src->stride * (idx1-idx0);
+	size_lnp = src->lnp_arr_stride * (idx1-idx0);
+
+	memcpy((void*)gw_get(dst,idx0),(void*)gw_get(src,idx0),size);
+	memcpy((void*)gw_get_lnp(dst,idx0),(void*)gw_get_lnp(src,idx0),size_lnp);
+	dst->w_arr_size = src->w_arr_size;
+	dst->lnp_arr_size = src->lnp_arr_size;
+	dst->stride = src->stride;
+	dst->lnp_arr_stride = src->lnp_arr_stride;
+	
+}
+
+void gw_metropolis2(gw_ensemble * s, int nsteps) {
+
+	int tid,i,j,k,seed,accept,nwalkers;
+	double lnp,lnpp,B,mh_sigma;
+	double * w;
+	double *prop;
+	double *_lnp;
+	gsl_rng * r;
+	gw_ensemble * local;
+	int ndim;
+
+	accept = 0;
+	seed = rand();
+	mh_sigma = s->mh_sigma;
+	nwalkers = s->nwalkers;
+	ndim = s->ndim;
+	B = s->B;
+	
+	omp_set_num_threads(s->nthreads);	
+	
+	#pragma omp parallel \
+	private(local,tid,r,w,prop,lnp,_lnp,i,j,k) \
+	firstprivate(seed,ndim,B,nsteps,nwalkers,mh_sigma) \
+	shared(s,accept)
+	{
+		tid = omp_get_thread_num();
+		gsl_rng_set(r,seed + tid * time(NULL));
+		prop = (double*)malloc(sizeof(double) * s->ndim);
+		local = gw_alloc(s->nthreads,nwalkers,ndim);
+		gw_copy(s,local);
+		
+		#pragma omp for reduction(+:accept)
+		for(j = 0; j < nwalkers; j++){
+			for(i=0;i<nsteps;i++){
+				
+			
+				/* pointer to the walker of interest */
+			 	w = gw_get(local,i);
+	
+				/* pick a gaussian proposal */
+				for(j=0;j<ndim;j++){
+					prop[j] = gsl_ran_gaussian(r,mh_sigma) + w[j];
+				}
+	
+				/* get a pointer to log probability value of
+				 * this walker position */
+				_lnp = gw_get_lnp(local,i);
+	
+				/* Avoid calculating lnprob unless
+				 * this is the first iteration */
+				if (*_lnp == 0) {
+					lnp = local->lnprob(w,ndim);
+					*_lnp = lnp;
+				}
+				else {
+					lnp = *_lnp;
+				}
+				
+				lnpp = s->lnprob(prop,ndim);
+	
+				if( s->B * (lnpp-lnp) > 0 ||
+					 log(gsl_ran_flat(r,0,1)) < B * (lnpp-lnp)) {
+	
+					/* Accept proposed move*/
+	
+					accept += 1;
+					*_lnp = lnpp;/* Save the lnprob value for posterity*/
+	
+					/* Copy over the proposal */
+	
+					for(k=0;k<s->ndim;k++){
+						w[k] = prop[k];
+					}
+				}
+				
+			}
+			/* Bottlenck step--every thread copies its results back */
+			gw_copy_partial(local,s,j,j+1);
+		}
+
+		
+		gsl_rng_free(r);
+		gw_free(local);
+		free(prop);
+		
+		
+	}
+	
+	
+}
+
+
 void gw_metropolis(gw_ensemble * s) {
 /* Do one metrpolis update of all the walkers
  * in the ensemble in parallel. */
@@ -112,6 +232,14 @@ void gw_metropolis(gw_ensemble * s) {
 	double *prop;
 	double *_lnp;
 	gsl_rng * r;
+	
+	int ndim,nwalkers;
+	double B, mh_sigma;
+	
+	B = s->B;
+	mh_sigma = s->mh_sigma;
+	ndim = s->ndim;
+	nwalkers = s->nwalkers;
 
 	accept = 0;
 	seed = rand();
@@ -120,7 +248,7 @@ void gw_metropolis(gw_ensemble * s) {
 
 	#pragma omp parallel \
 		private(tid,r,w,prop,i,j,lnpp,lnp,_lnp) \
-		firstprivate(seed) \
+		firstprivate(seed,B,ndim,nwalkers,mh_sigma) \
 		shared(s,accept)
 	{
 		tid = omp_get_thread_num();
@@ -140,17 +268,17 @@ void gw_metropolis(gw_ensemble * s) {
 
 		 /* Every thread is going to need space
 		  * to store a proposal move */
-		 prop = (double*)malloc(sizeof(double) * s->ndim);
+		 prop = (double*)malloc(sizeof(double) * ndim);
 
 		 #pragma omp for reduction(+:accept)
-		 for(i=0;i<s->nwalkers;i++) {
+		 for(i=0;i<nwalkers;i++) {
 
 		 	/* pointer to the walker of interest */
 		 	w = gw_get(s,i);
 
 			/* pick a gaussian proposal */
-			for(j=0;j<s->ndim;j++){
-				prop[j] = gsl_ran_gaussian(r,s->mh_sigma) + w[j];
+			for(j=0;j<ndim;j++){
+				prop[j] = gsl_ran_gaussian(r,mh_sigma) + w[j];
 			}
 
 			/* get a pointer to log probability value of
@@ -160,17 +288,17 @@ void gw_metropolis(gw_ensemble * s) {
 			/* Avoid calculating s->lnprob unless
 			 * this is the first iteration */
 			if (*_lnp == 0) {
-				lnp = s->lnprob(w,s->ndim);
+				lnp = s->lnprob(w,ndim);
 				*_lnp = lnp;
 			}
 			else {
 				lnp = *_lnp;
 			}
 			
-			lnpp = s->lnprob(prop,s->ndim);
+			lnpp = s->lnprob(prop,ndim);
 
 			if( s->B * (lnpp-lnp) > 0 ||
-				 log(gsl_ran_flat(r,0,1)) < s->B * (lnpp-lnp)) {
+				 log(gsl_ran_flat(r,0,1)) < B * (lnpp-lnp)) {
 
 				/* Accept proposed move*/
 
@@ -179,14 +307,14 @@ void gw_metropolis(gw_ensemble * s) {
 
 				/* Copy over the proposal */
 
-				for(j=0;j<s->ndim;j++){
+				for(j=0;j<ndim;j++){
 					w[j] = prop[j];
 				}
 
 			}
 		 }
 
-		 free(r);
+		 gsl_rng_free(r);
 		 free(prop);
 
 	}
