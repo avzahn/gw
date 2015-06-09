@@ -1,0 +1,26 @@
+Code comments contain fine details, however the following is relevant to
+any grader:
+
+omp_scaling.c iterates a gw_ensemble over a varying number of threads, using
+gw_metropolis(), which is an ansatz for an affine invariant stretch move and
+outputs the CPU clock time spent to stdout. This script generates the data
+used in the presentation slides. Note that gw_metropolis() is only meant to
+simulate the conditions required by a stretch move, namely that each worker 
+thread does all its work in shared memory. It is however a real, working
+Metropolis-Hastings implementation.
+
+omp_scaling2.c does precisely the same, but using gw_metropolis2(), which
+does not use global memory at every step, instead copying the ensemble 
+to thread-local memory, iterating each walker independently for a given number
+of steps, and then copying it back to shared memory. While I did not test it, I
+do fully expect to see linear performance per thread scaling with omp_scaling2.
+
+gw.c implements all the openmp parallelism used in this project, and provides
+all the utilities for storing and iterating a single ensemble.
+
+pt.c implements an MPI based parallel tempering scheme, using gw to run one
+ensemble per node. pt_mpi.c is a script that tests this.
+
+gaussian.c is a simple demonstration proving that gw_metropolis() does in fact
+successfully sample a one dimensional gaussian. At the end of the script, it 
+dumps all the walker positions to a text file.

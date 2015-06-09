@@ -23,18 +23,13 @@ gw_ensemble * gw_alloc(int nthreads,int nwalkers,int ndim){
 	 * ndim is near 8. The risk is much worsened for
 	 * low values of nwalkers.
 	 *
-	 * For Metropolis-Hastings:
-	 * 
-	 * Every thread is going to need to potentially read
-	 * and write every walker at every iteration. 
-	 *
 	 * We have two options to deal with this. The first
 	 * is to give each thread a separate copy of each 
 	 * walker, and then synchronize all the copies in
 	 * serial. Synchronization would be extremely
-	 * expensive, however, given that way may have 
-	 * several gigabytes worth of walkers.
-
+	 * expensive, however, given that we would have to do
+	 * it every time we updated a walker.
+	 *
 	 * The second option, which we implement here, is 
 	 * to pad the walkers inside the walker arrays and
 	 * enforce cache line alignment of each walker. The
@@ -56,22 +51,8 @@ gw_ensemble * gw_alloc(int nthreads,int nwalkers,int ndim){
 
 	/* Do the same thing for the lnprob values */
 	lnp_arr_size = CACHE_LINE_SIZE * nwalkers;
-
-	alloc_fail += posix_memalign((void**)&(s->w),
-		CACHE_LINE_SIZE, w_arr_size);
-
-	alloc_fail += posix_memalign((void**)&(s->lnp),
-		CACHE_LINE_SIZE, lnp_arr_size);
-
-	assert(alloc_fail == 0);
-
-	for(i=0;i<lnp_arr_size;i++){
-		lnp = gw_get_lnp(s,i);
-		*lnp = 0;
-
-	}
-
-
+	
+	
 	s->a = 2;
 	s->B = 1;
 	s->accept = 0;
@@ -82,6 +63,25 @@ gw_ensemble * gw_alloc(int nthreads,int nwalkers,int ndim){
 	s->w_arr_size = w_arr_size;
 	s->lnp_arr_size = lnp_arr_size;
 	s->lnp_arr_stride = CACHE_LINE_SIZE;
+	
+	
+
+	alloc_fail += posix_memalign((void**)&(s->w),
+		CACHE_LINE_SIZE, w_arr_size);
+
+	alloc_fail += posix_memalign((void**)&(s->lnp),
+		CACHE_LINE_SIZE, lnp_arr_size);
+
+	assert(alloc_fail == 0);
+
+	for(i=0;i<nwalkers;i++){
+		lnp = gw_get_lnp(s,i);
+		*lnp = 0;
+
+	}
+
+
+
 
 	/* going to need rand() later */
 	srand(time(NULL));
@@ -131,6 +131,12 @@ void gw_copy_partial(gw_ensemble * src, gw_ensemble * dst, int idx0, int idx1){
 }
 
 void gw_metropolis2(gw_ensemble * s, int nsteps) {
+	
+	/* Not a stand in for the stretch move. Divide up
+	 * the ensemble over a team of threads and have each
+	 * thread independently iterate its subensemble
+	 * on a local copy that gets copied back at the end of the
+	 * function. */
 
 	int tid,i,j,k,seed,accept,nwalkers;
 	double lnp,lnpp,B,mh_sigma;
@@ -156,18 +162,24 @@ void gw_metropolis2(gw_ensemble * s, int nsteps) {
 	shared(s,accept)
 	{
 		tid = omp_get_thread_num();
+		r = gsl_rng_alloc(gsl_rng_mt19937);
 		gsl_rng_set(r,seed + tid * time(NULL));
 		prop = (double*)malloc(sizeof(double) * s->ndim);
 		local = gw_alloc(s->nthreads,nwalkers,ndim);
+		local->lnprob = s->lnprob;
 		gw_copy(s,local);
 		
 		#pragma omp for reduction(+:accept)
 		for(j = 0; j < nwalkers; j++){
 			for(i=0;i<nsteps;i++){
 				
+				fprintf(stderr,"%i: %i, %i\n",tid,i,j);
+				
 			
 				/* pointer to the walker of interest */
 			 	w = gw_get(local,i);
+			 	
+
 	
 				/* pick a gaussian proposal */
 				for(j=0;j<ndim;j++){
@@ -177,19 +189,25 @@ void gw_metropolis2(gw_ensemble * s, int nsteps) {
 				/* get a pointer to log probability value of
 				 * this walker position */
 				_lnp = gw_get_lnp(local,i);
+				
+																
 	
 				/* Avoid calculating lnprob unless
 				 * this is the first iteration */
 				if (*_lnp == 0) {
+					
 					lnp = local->lnprob(w,ndim);
-					*_lnp = lnp;
+					
+					*_lnp = lnp;					
 				}
 				else {
 					lnp = *_lnp;
 				}
 				
+											
 				lnpp = s->lnprob(prop,ndim);
-	
+		
+				
 				if( s->B * (lnpp-lnp) > 0 ||
 					 log(gsl_ran_flat(r,0,1)) < B * (lnpp-lnp)) {
 	
@@ -199,12 +217,13 @@ void gw_metropolis2(gw_ensemble * s, int nsteps) {
 					*_lnp = lnpp;/* Save the lnprob value for posterity*/
 	
 					/* Copy over the proposal */
+
 	
 					for(k=0;k<s->ndim;k++){
 						w[k] = prop[k];
 					}
 				}
-				
+
 			}
 			/* Bottlenck step--every thread copies its results back */
 			gw_copy_partial(local,s,j,j+1);
@@ -225,6 +244,12 @@ void gw_metropolis2(gw_ensemble * s, int nsteps) {
 void gw_metropolis(gw_ensemble * s) {
 /* Do one metrpolis update of all the walkers
  * in the ensemble in parallel. */
+ 
+ 
+/* This functions is a stand-in for the affine invariant 
+ * stretch move; it happens do to a metrpolis step, but it
+ * reads and writes a shared ensemble at every step exacty
+ * the way the stretch move would have to */
 
 	int tid,i,j,seed,accept;
 	double lnp,lnpp;
@@ -269,6 +294,8 @@ void gw_metropolis(gw_ensemble * s) {
 		 /* Every thread is going to need space
 		  * to store a proposal move */
 		 prop = (double*)malloc(sizeof(double) * ndim);
+		 
+
 
 		 #pragma omp for reduction(+:accept)
 		 for(i=0;i<nwalkers;i++) {
@@ -369,14 +396,14 @@ void gw_write_text(gw_ensemble * s, char * fname) {
 
 	FILE * f = fopen(fname,"w");
 
-	w = gw_get(s,0);
+	
 
 	for(i=0;i<s->nwalkers;i++){
+		w = gw_get(s,i);
 		for(j=0;j<s->ndim;j++){
 			fprintf(f,"%f,",s->w[j]);
 			fprintf(f,"\n");
 		}
-		w = gw_inc(s->stride,w);
 	}
 	fclose(f);
 }
